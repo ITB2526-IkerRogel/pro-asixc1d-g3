@@ -1,0 +1,248 @@
+---
+# SERVIDOR 1: DIRECTORIO ACTIVO (LDAP)
+- name: Instalar y configurar el Servidor LDAP
+  hosts: directorio_activo
+  become: true
+  tasks:
+
+    - name: 1. Crear el usuario admin_LDAP en el sistema
+      ansible.builtin.user:
+        name: admin_LDAP
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+
+    - name: 2. Asignar contraseña para el usuario admin_LDAP
+      ansible.builtin.shell: "echo 'admin_LDAP:pirineus' | chpasswd"
+
+    - name: 3. Copiar la clave SSH para entrar sin contrasenia
+      ansible.builtin.authorized_key:
+        user: admin_LDAP
+        state: present
+        key: "{{ lookup('file', '~/.ssh/authorized_keys') }}"
+
+    - name: 4. Instalar los paquetes de OpenLDAP
+      ansible.builtin.apt:
+        name:
+          - slapd
+          - ldap-utils
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: 5. Asegurar que el servicio LDAP esta encendido
+      ansible.builtin.systemd:
+        name: slapd
+        state: started
+        enabled: true
+
+    - name: 6. Cambiar el dominio interno de LDAP a innovate.tech.itb.cat
+      ansible.builtin.shell: |
+        ldapmodify -Y EXTERNAL -H ldapi:/// <<'LDIF'
+        dn: olcDatabase={1}mdb,cn=config
+        changetype: modify
+        replace: olcSuffix
+        olcSuffix: dc=innovate,dc=tech,dc=itb,dc=cat
+        -
+        replace: olcRootDN
+        olcRootDN: cn=admin,dc=innovate,dc=tech,dc=itb,dc=cat
+        LDIF
+
+    - name: 7. Establecer la contraseña pirineus para el administrador de LDAP
+      ansible.builtin.shell: |
+        ldapmodify -Y EXTERNAL -H ldapi:/// <<'LDIF'
+        dn: olcDatabase={1}mdb,cn=config
+        changetype: modify
+        replace: olcRootPW
+        olcRootPW: pirineus
+        LDIF
+
+    - name: 8. Crear el archivo de usuarios en la home de admin_LDAP
+      ansible.builtin.copy:
+        dest: /home/admin_LDAP/usuarios.ldif
+        owner: admin_LDAP
+        group: admin_LDAP
+        mode: '0644'
+        content: |
+          dn: dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: top
+          objectClass: dcObject
+          objectClass: organization
+          o: Innovate Tech ITB
+          dc: innovate
+
+          dn: ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: organizationalUnit
+          ou: usuarios
+
+          dn: ou=grupos,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: organizationalUnit
+          ou: grupos
+
+          dn: cn=sftp_users,ou=grupos,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: posixGroup
+          cn: sftp_users
+          gidNumber: 3000
+
+          dn: cn=Ivan,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Ivan
+          sn: Ivan
+          uid: ivan
+          uidNumber: 2001
+          gidNumber: 3000
+          homeDirectory: /home/ivan
+          loginShell: /bin/bash
+          userPassword: pirineus
+
+          dn: cn=Iker,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Iker
+          sn: Iker
+          uid: iker
+          uidNumber: 2002
+          gidNumber: 3000
+          homeDirectory: /home/iker
+          loginShell: /bin/bash
+          userPassword: pirineus
+
+          dn: cn=Xavier,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Xavier
+          sn: Xavier
+          uid: xavier
+          uidNumber: 2003
+          gidNumber: 3000
+          homeDirectory: /home/xavier
+          loginShell: /bin/bash
+          userPassword: pirineus
+
+          dn: cn=Piero,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Piero
+          sn: Piero
+          uid: piero
+          uidNumber: 2004
+          gidNumber: 3000
+          homeDirectory: /home/piero
+          loginShell: /bin/bash
+          userPassword: pirineus
+
+    - name: 9. Importar la raiz y los usuarios al Directorio Activo
+      ansible.builtin.command: >
+        ldapadd -x
+        -D "cn=admin,dc=innovate,dc=tech,dc=itb,dc=cat"
+        -w "pirineus"
+        -f /home/admin_LDAP/usuarios.ldif
+      register: ldap_result
+      failed_when: "ldap_result.rc != 0 and 'Already exists' not in ldap_result.stderr"
+
+
+# SERVIDOR 2: SERVIDOR DE LOGS
+- name: Instalar y configurar el Servidor de Logs
+  hosts: servidor_logs
+  become: true
+  tasks:
+
+    - name: 1. Crear el usuario admin_Logs en el sistema
+      ansible.builtin.user:
+        name: admin_Logs
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+
+    - name: 2. Asignar la contraseña al usuario admin_Logs
+      ansible.builtin.shell: "echo 'admin_Logs:pirineus' | chpasswd"
+
+    - name: 3. Copiar la clave SSH para entrar sin contrasenia
+      ansible.builtin.authorized_key:
+        user: admin_Logs
+        state: present
+        key: "{{ lookup('file', '~/.ssh/authorized_keys') }}"
+
+    - name: 4. Instalar utilidades básicas del sistema y auditd
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - gpg
+          - auditd
+        state: present
+        update_cache: true
+
+    - name: 5. Descargar la clave de seguridad de Elastic
+      ansible.builtin.get_url:
+        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        dest: /tmp/elastic.asc
+
+    - name: 6. Registrar la clave de Elastic en el sistema
+      ansible.builtin.shell: "gpg --dearmor < /tmp/elastic.asc > /usr/share/keyrings/elasticsearch-keyring.gpg"
+      args:
+        creates: /usr/share/keyrings/elasticsearch-keyring.gpg
+
+    - name: 7. Añadir el repositorio oficial de Elastic
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/elasticsearch-keyring.gpg] https://artifacts.elastic.co/packages/8.x/apt stable main"
+        state: present
+        filename: elastic-8.x
+
+    - name: 8. Descargar e instalar Elasticsearch, Kibana y Auditbeat 8.17.4
+      ansible.builtin.apt:
+        name:
+          - elasticsearch=8.17.4
+          - kibana=8.17.4
+          - auditbeat=8.17.4
+        state: present
+        update_cache: true
+
+    - name: 9. Desactivar el modulo de seguridad SSL para entorno de laboratorio
+      ansible.builtin.lineinfile:
+        path: /etc/elasticsearch/elasticsearch.yml
+        regexp: '^xpack.security.enabled:'
+        line: 'xpack.security.enabled: false'
+
+    - name: 10. Configurar Kibana para que sea accesible desde fuera
+      ansible.builtin.lineinfile:
+        path: /etc/kibana/kibana.yml
+        regexp: '^#?server.host:'
+        line: 'server.host: "0.0.0.0"'
+
+    - name: 11. Activar y encender Elasticsearch
+      ansible.builtin.systemd:
+        name: elasticsearch
+        state: started
+        enabled: true
+
+    - name: 12. Esperar a que Elasticsearch termine de arrancar internamente
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9200
+        timeout: 60
+
+    - name: 13. Activar y encender Kibana
+      ansible.builtin.systemd:
+        name: kibana
+        state: started
+        enabled: true
+
+    - name: 14. Activar y encender el servicio de auditoria auditd
+      ansible.builtin.systemd:
+        name: auditd
+        state: started
+        enabled: true
+
+    - name: 15. Activar y encender el recolector auditbeat
+      ansible.builtin.systemd:
+        name: auditbeat
+        state: started
+        enabled: true
