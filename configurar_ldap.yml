@@ -1,0 +1,277 @@
+---
+# ==============================================================================
+# PLAY PRE-FLIGHT: LEER EL CERTIFICADO DEL SERVIDOR DE LOGS PARA PODER COPIARLO
+# ==============================================================================
+- name: Pre-flight - Leer el certificado del Servidor de Logs Central
+  hosts: servidor_logs
+  become: true
+  gather_facts: false
+  vars:
+    # Usamos el usuario específico y la clave que ya dejamos configurados y funcionando
+    ansible_user: admin_Logs
+    ansible_ssh_private_key_file: "{{ clave_privada_nueva }}"
+  tasks:
+    - name: Obtener el certificado CA de Elasticsearch en memoria
+      slurp:
+        src: /etc/elasticsearch/certs/http_ca.crt
+      register: elastic_ca_cert
+
+# ==============================================================================
+# FASE 1: PREPARAR EL SERVIDOR LDAP REMOTO (Crear usuario admin_LDAP)
+# ==============================================================================
+- name: Bootstrap - Crear usuario administrador específico en el Servidor LDAP
+  hosts: servidor_ldap
+  become: true
+  gather_facts: false
+  vars:
+    ansible_user: "{{ ansible_user_inicial }}"
+    ansible_ssh_private_key_file: "{{ ansible_ssh_private_key_file_inicial }}"
+  
+  tasks:
+    - name: Asegurar que el grupo admin_LDAP existe
+      group:
+        name: admin_LDAP
+        state: present
+
+    - name: Crear el usuario admin_LDAP con bash por defecto
+      user:
+        name: admin_LDAP
+        group: admin_LDAP
+        shell: /bin/bash
+        state: present
+
+    - name: Configurar SUDO sin contraseña para admin_LDAP (Requisito de la práctica)
+      copy:
+        dest: /etc/sudoers.d/admin_ldap
+        content: "admin_LDAP ALL=(ALL) NOPASSWD:ALL"
+        validate: '/usr/sbin/visudo -cf %s'
+        owner: root
+        group: root
+        mode: '0440'
+
+    - name: Desplegar la clave pública SSH para permitir acceso automatizado
+      authorized_key:
+        user: admin_LDAP
+        state: present
+        key: "{{ lookup('file', clave_publica_nueva) }}"
+
+# ==============================================================================
+# FASE 2: INSTALACIÓN Y CONFIGURACIÓN DE OPENLDAP (Como admin_LDAP)
+# ==============================================================================
+- name: Instalar y configure el Servidor OpenLDAP con estructura de usuarios
+  hosts: servidor_ldap
+  become: true
+  vars:
+    ansible_user: admin_LDAP
+    ansible_ssh_private_key_file: "{{ clave_privada_nueva }}"
+    ldap_domain: "dc=innovate,dc=tech,dc=itb,dc=cat"
+    ldap_admin_dn: "cn=admin,dc=innovate,dc=tech,dc=itb,dc=cat"
+    ldap_pass: "pirineus"
+
+  tasks:
+    - name: Instalar los paquetes oficiales de OpenLDAP de forma desasistida
+      apt:
+        name: [slapd, ldap-utils]
+        state: present
+        update_cache: yes
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Asegurar que el servicio slapd está activo
+      systemd:
+        name: slapd
+        state: started
+        enabled: yes
+
+    - name: Modificar el Suffix y RootDN interno de la base de datos mdb
+      shell: |
+        ldapmodify -Y EXTERNAL -H ldapi:/// <<'LDIF'
+        dn: olcDatabase={1}mdb,cn=config
+        changetype: modify
+        replace: olcSuffix
+        olcSuffix: {{ ldap_domain }}
+        -
+        replace: olcRootDN
+        olcRootDN: {{ ldap_admin_dn }}
+        LDIF
+
+    - name: Establecer la contraseña RootPW del administrador de LDAP
+      shell: |
+        ldapmodify -Y EXTERNAL -H ldapi:/// <<'LDIF'
+        dn: olcDatabase={1}mdb,cn=config
+        changetype: modify
+        replace: olcRootPW
+        olcRootPW: {{ ldap_pass }}
+        LDIF
+
+    - name: Crear el archivo estructurado usuarios.ldif en la Home
+      copy:
+        dest: /home/admin_LDAP/usuarios.ldif
+        owner: admin_LDAP
+        group: admin_LDAP
+        mode: '0644'
+        content: |
+          dn: dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: top
+          objectClass: dcObject
+          objectClass: organization
+          o: Innovate Tech ITB
+          dc: innovate
+
+          dn: ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: organizationalUnit
+          ou: usuarios
+
+          dn: ou=grupos,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: organizationalUnit
+          ou: grupos
+
+          dn: cn=sftp_users,ou=grupos,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: posixGroup
+          cn: sftp_users
+          gidNumber: 3000
+
+          dn: cn=Ivan,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Ivan
+          sn: Ivan
+          uid: ivan
+          uidNumber: 2001
+          gidNumber: 3000
+          homeDirectory: /home/ivan
+          loginShell: /bin/bash
+          userPassword: {{ ldap_pass }}
+
+          dn: cn=Iker,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Iker
+          sn: Iker
+          uid: iker
+          uidNumber: 2002
+          gidNumber: 3000
+          homeDirectory: /home/iker
+          loginShell: /bin/bash
+          userPassword: {{ ldap_pass }}
+
+          dn: cn=Xavier,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Xavier
+          sn: Xavier
+          uid: xavier
+          uidNumber: 2003
+          gidNumber: 3000
+          homeDirectory: /home/xavier
+          loginShell: /bin/bash
+          userPassword: {{ ldap_pass }}
+
+          dn: cn=Piero,ou=usuarios,dc=innovate,dc=tech,dc=itb,dc=cat
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          objectClass: shadowAccount
+          cn: Piero
+          sn: Piero
+          uid: piero
+          uidNumber: 2004
+          gidNumber: 3000
+          homeDirectory: /home/piero
+          loginShell: /bin/bash
+          userPassword: {{ ldap_pass }}
+
+    - name: Importar la estructura base y los 4 usuarios al Directorio Activo
+      command: 'ldapadd -x -D "{{ ldap_admin_dn }}" -w "{{ ldap_pass }}" -f /home/admin_LDAP/usuarios.ldif'
+      register: ldap_result
+      failed_when: "ldap_result.rc != 0 and 'Already exists' not in ldap_result.stderr"
+      changed_when: "'adding new entry' in ldap_result.stdout"
+
+# ==============================================================================
+# FASE 3: AUDITORÍA Y CENTRALIZACIÓN DE LOGS HACIA EL SERVIDOR CENTRAL
+# ==============================================================================
+- name: Conectar Servidor LDAP con la centralización de logs Auditbeat 8.17.4
+  hosts: servidor_ldap
+  become: true
+  vars:
+    ansible_user: admin_LDAP
+    ansible_ssh_private_key_file: "{{ clave_privada_nueva }}"
+    elasticsearch_server_ip: "{{ hostvars['servidor_logs']['ansible_host'] }}"
+    elastic_exact_version: "8.17.4"
+    elastic_password_client: "TuContrasenaSeguraAqui123!"
+
+  tasks:
+    - name: Instalar utilidades del sistema y auditoría base
+      apt:
+        name: [apt-transport-https, gpg, wget, auditd]
+        state: present
+        update_cache: yes
+
+    - name: Descargar clave GPG oficial de Elastic
+      get_url:
+        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        dest: /usr/share/keyrings/elasticsearch-keyring.asc
+
+    - name: Convertir formato de clave GPG
+      command: gpg --dearmor -o /usr/share/keyrings/elasticsearch-keyring.gpg /usr/share/keyrings/elasticsearch-keyring.asc
+      args:
+        creates: /usr/share/keyrings/elasticsearch-keyring.gpg
+
+    - name: Vincular repositorio oficial de Elastic
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/elasticsearch-keyring.gpg] https://artifacts.elastic.co/packages/8.x/apt stable main"
+        state: present
+        filename: elastic-8.x
+
+    - name: Instalar el agente Auditbeat en su versión exacta 8.17.4
+      apt:
+        name: "auditbeat={{ elastic_exact_version }}"
+        state: present
+        force: yes
+
+    - name: Asegurar existencia limpia del directorio de datos del agente
+      file:
+        path: /var/lib/auditbeat
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+
+    - name: Descargar de forma segura el certificado CA SSL desde el Servidor de Logs Central
+      copy:
+        content: "{{ hostvars['servidor_logs']['elastic_ca_cert']['content'] | b64decode }}"
+        dest: /etc/auditbeat/elasticsearch-ca.crt
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Inyectar la configuración de salida cifrada segura en auditbeat.yml
+      blockinfile:
+        path: /etc/auditbeat/auditbeat.yml
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          output.elasticsearch:
+            hosts: ["https://{{ elasticsearch_server_ip }}:9200"]
+            username: "elastic"
+            password: "{{ elastic_password_client }}"
+            ssl.certificate_authorities: ["/etc/auditbeat/elasticsearch-ca.crt"]
+          setup.kibana:
+            host: "http://{{ elasticsearch_server_ip }}:5601"
+
+    - name: Activar y arrancar el demonio del kernel de auditoría linux
+      systemd:
+        name: auditd
+        state: started
+        enabled: yes
+      failed_when: false
+
+    - name: "Registrar las Data Views de auditoría de LDAP en Kibana central"
+      command: auditbeat setup
+
+    - name: Arrancar de forma definitiva el agente Auditbeat en el servidor LDAP
+      systemd:
+        name: auditbeat
+        enabled: yes
+        state: restarted
